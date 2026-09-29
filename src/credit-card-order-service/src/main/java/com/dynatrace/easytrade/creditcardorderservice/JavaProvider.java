@@ -15,7 +15,10 @@ public class JavaProvider implements FeatureProvider {
     @Override
     public ProviderEvaluation<Boolean> getBooleanEvaluation(String key, Boolean defaultValue, EvaluationContext ctx) {
         FeatureFlag flag = featureFlagClient.getFlag(key);
-        return constructProviderEvaluation(flag.enabled());
+        // The client is fail-safe and never returns null, but guard against a null 'enabled'
+        // field in the flag payload by honoring the caller's default value.
+        Boolean enabled = (flag != null && flag.enabled() != null) ? flag.enabled() : defaultValue;
+        return constructProviderEvaluation(enabled);
     }
 
     @Override

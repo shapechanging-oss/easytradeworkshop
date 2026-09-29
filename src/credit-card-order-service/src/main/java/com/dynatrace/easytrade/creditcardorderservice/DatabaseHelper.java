@@ -220,11 +220,22 @@ public class DatabaseHelper {
                     HikariConfig config = new HikariConfig();
                     config.setJdbcUrl(System.getenv("MSSQL_CONNECTIONSTRING"));
                     config.setPoolName("credit-card-order-pool");
+                    // Sized for burst concurrency, not raw throughput: production shows <=1 DB
+                    // call per request at ~4ms p95, so a pool comfortably above the peak
+                    // concurrent request count (~23 req/s peak at 100x) protects the DB while
+                    // covering bursts. Tunable per replica against the DB's real connection ceiling.
                     config.setMaximumPoolSize(readIntEnv("DB_POOL_MAX_SIZE", 20));
                     config.setMinimumIdle(readIntEnv("DB_POOL_MIN_IDLE", 2));
-                    config.setConnectionTimeout(readIntEnv("DB_POOL_CONNECTION_TIMEOUT_MS", 10000));
+                    // Fail fast: if no connection is free within this window, the request errors
+                    // out quickly instead of tying up a Tomcat thread waiting -- this is what
+                    // prevents a brief DB stall from cascading into thread-pool exhaustion.
+                    config.setConnectionTimeout(readIntEnv("DB_POOL_CONNECTION_TIMEOUT_MS", 3000));
+                    config.setValidationTimeout(readIntEnv("DB_POOL_VALIDATION_TIMEOUT_MS", 2000));
+                    config.setMaxLifetime(readIntEnv("DB_POOL_MAX_LIFETIME_MS", 1800000));
+                    config.setKeepaliveTime(readIntEnv("DB_POOL_KEEPALIVE_MS", 300000));
                     dataSource = new HikariDataSource(config);
-                    logger.info("Initialized HikariCP pool [maxPoolSize={}]", config.getMaximumPoolSize());
+                    logger.info("Initialized HikariCP pool [maxPoolSize={}, connectionTimeoutMs={}]",
+                            config.getMaximumPoolSize(), config.getConnectionTimeout());
                 }
             }
         }

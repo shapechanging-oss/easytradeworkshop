@@ -89,3 +89,56 @@ The feature is built to be **safe by default and horizontally scalable**. Concre
 
 4. **LOW / separate — `broker-service` `KeyNotFoundException`.** A recurring error in a different
    service (51 occurrences/7d). Out of scope for this PR; flagged for separate root-causing.
+
+---
+
+## Addendum — 100x of PEAK traffic: what breaks first (Bluebox)
+
+The original §1 used average traffic. This addendum re-runs the analysis against **peak**
+traffic, per Bluebox, and drives the additional hardening in the second commit.
+
+**Measured peak (last 7 days, `credit-card-order-service`; conv `conv_0KrNQx7A393N2SKiZimcer`):**
+- Busiest single minute: **14 requests/min ≈ 0.23 req/s** (occurred 2026-09-25 04:49 and 2026-09-27 19:58 UTC).
+- Traffic is very flat: p95 ≈ 9 req/min, weekly avg ≈ 6.5 req/min. Peak is only ~2x average.
+- **100x of peak ≈ 1,400 req/min ≈ ~23 req/s.**
+
+**Per-request cost (conv `conv_5CObOwRoxLqUV86bqA1DC5`):**
+- DB calls per request: **≤ 1** (83% make exactly 1; 17% make 0). Never more than one round-trip.
+- DB latency: avg ~1.73 ms, **p95 ~3.90 ms**.
+- JVM threads: ~6 typical, peak ~12. Connection errors: **3 in 7 days** (no timeouts).
+
+### What this changes about the breakpoint order
+
+At **~23 req/s with a single ~4 ms DB call**, raw DB *throughput* is comfortable. The real
+failure modes at 100x-peak are **concurrency bursts** and **synchronous fan-out**, not query volume:
+
+| Rank | What breaks first | Failure mode at 100x-peak | Mitigation (this PR) |
+|---|---|---|---|
+| 1 | **feature-flag-service fan-out** | One synchronous flag call **per request** → ~23 network calls/s on the hot path; if the flag service slows, every request thread blocks → thread-pool exhaustion (a single point of failure). | **Short-TTL cache** (default 5s) collapses fan-out to ≤1 call per flag per TTL; **fail-safe** fallback returns last-known/disabled instead of throwing; **bounded timeouts**. |
+| 2 | **DB connection pool under burst** | A concurrent burst can transiently need more connections than the pool has; unbounded waits would pile up on Tomcat threads. | **HikariCP** with a pool sized above peak concurrency and a **3s fail-fast acquisition timeout** so requests error quickly instead of queueing. |
+| 3 | **Tomcat thread pool** | Only reached if 1–2 aren't addressed (blocked threads waiting on flag/DB). | Addressing 1 and 2 keeps threads short-lived; threads run in single digits today. |
+
+### Requires INFRASTRUCTURE changes (cannot be fixed in this repo alone)
+
+These are flagged for the platform/ops owners — code changes here do not cover them:
+
+1. **MSSQL is a single point of failure with no telemetry.** No CPU/memory/connection metrics
+   exist for the database (confirmed twice via Bluebox). Before any real 100x load: add a
+   host/DB monitoring agent, and provision **read replicas** (the read-heavy `status/latest`
+   path is a natural fit) plus right-sizing. The connection **pool per replica × replica count**
+   must stay under the DB's real `max connections` — that ceiling is an infra fact we can't see.
+2. **No horizontal autoscaling configured.** The service is stateless and the helm chart
+   supports an `hpa`, but it is not enabled. Enable HPA (target CPU + latency) for
+   `credit-card-order-service` **and** `feature-flag-service` to actually absorb 100x.
+3. **feature-flag-service capacity.** Even with client-side caching, it remains the busiest
+   dependency; it needs its own scaling/replicas and ideally its own SLO.
+4. **No observability / no SLOs / no in-flight-concurrency metric.** The service emits no
+   OpenTelemetry and no active-requests gauge, so in-flight concurrency (the key capacity
+   signal at 100x) is invisible. Instrument the service, add an active-requests metric, and
+   define p95-latency + error-rate SLOs so a load test has a pass/fail bar.
+5. **Load test required.** All the numbers above are *current* production, not a stress test.
+   The pool/thread/cache sizes are starting points; re-run these Bluebox checks against
+   synthetic 100x-peak load (against a real DB) before enabling the feature at scale.
+
+> Reminder (Bluebox): monitoring reflects only observed behaviour. A clean result here is not
+> a guarantee that 100x-peak is safe — the infra items above must be in place and load-tested.
