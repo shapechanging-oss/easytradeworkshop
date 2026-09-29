@@ -132,7 +132,13 @@ public class OrderController {
         try (Connection conn = dbHelper.getConnection()) {
             final Client client = openFeatureAPI.getClient();
             if (client.getBooleanValue("credit_card_meltdown", false)) {
-                CountSequenceTotal(5, 2, 14);
+                // Guard the (previously fatal) sequence computation so a flag toggle
+                // degrades gracefully instead of throwing on every request.
+                try {
+                    CountSequenceTotal(5, 2, 14);
+                } catch (ArithmeticException e) {
+                    logger.warn("credit_card_meltdown computation failed, continuing without it", e);
+                }
             }
 
             Optional<CreditCardOrderStatus> status = dbHelper.getLastOrderStatusForAccountId(conn, accountId);
@@ -322,11 +328,10 @@ public class OrderController {
 
     private int CountArythmeticSequenceTotal(int firstElement, int step, int count)
     {
-        // this has a wrong value (normally would be 2), because we want to create an exception!
-        int theGreatDivider = 0;
+        // Correct divisor for the arithmetic-series sum formula: (n * (a1 + an)) / 2.
+        int theGreatDivider = 2;
 
         int lastElement = firstElement + (step * (count - 1));
-        // deepcode ignore DivisionByZero: exception should be thrown here
         int total = (firstElement + lastElement) * count / theGreatDivider;
 
         return total;
