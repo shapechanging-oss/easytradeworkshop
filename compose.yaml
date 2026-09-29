@@ -182,6 +182,9 @@ services:
       <<: *feature-flag-service-env
       WORK_DELAY: 300
       WORK_RATE: 900
+      # Connection pool + client timeout tuning (see docs/bitcoin-payment-feature.md).
+      DB_POOL_MAX_SIZE: 20
+      HTTP_CLIENT_TIMEOUT_SECONDS: 5
       JAVA_TOOL_OPTIONS: "-XX:-OmitStackTraceInFastThrow"
 
   third-party-service:

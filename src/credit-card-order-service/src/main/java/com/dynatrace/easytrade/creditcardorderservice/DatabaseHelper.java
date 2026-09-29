@@ -1,6 +1,10 @@
 package com.dynatrace.easytrade.creditcardorderservice;
 
 import com.dynatrace.easytrade.creditcardorderservice.models.*;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+
+import javax.sql.DataSource;
 import java.sql.*;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
@@ -28,6 +32,9 @@ public class DatabaseHelper {
     private final String DELETE_CREDIT_CARD_BY_ACCOUNT_ID_QUERY = "DELETE FROM CreditCards WHERE CreditCardOrderId = (SELECT y.Id FROM CreditCardOrders y WHERE y.AccountId = ?)";
     private final String DELETE_ORDER_BY_ACCOUNT_ID_QUERY = "DELETE FROM CreditCardOrders WHERE AccountId = ?";
     private final String GET_ORDER_ID_AND_CURRENT_STATUS = "select x.CreditCardOrderId, x.Status from CreditCardOrderStatus x inner join (select max(Id) Id, CreditCardOrderId from CreditCardOrderStatus group by CreditCardOrderId) y on x.CreditCardOrderId = y.CreditCardOrderId and x.Id = y.Id";
+    private final String INSERT_BITCOIN_PAYMENT_QUERY = "INSERT INTO [dbo].[BitcoinPayments] ([Id], [AccountId], [IdempotencyKey], [FiatAmount], [FiatCurrency], [AmountBtc], [BtcAddress], [Status], [CreatedAt]) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    private final String GET_BITCOIN_PAYMENT_BY_IDEMPOTENCY_KEY_QUERY = "SELECT * FROM BitcoinPayments WHERE IdempotencyKey = ?";
+    private final String GET_BITCOIN_PAYMENT_BY_ID_QUERY = "SELECT * FROM BitcoinPayments WHERE Id = ?";
     private static final Logger logger = LoggerFactory.getLogger(DatabaseHelper.class);
 
     public String insertNewOrder(Connection conn, CreditCardOrderRequest request) throws SQLException {
@@ -199,8 +206,46 @@ public class DatabaseHelper {
         }
     }
 
+    // Bounded, reused connection pool. Replaces the previous per-call
+    // DriverManager.getConnection(), which opened (and left GC to close) a brand-new
+    // connection on every request. The pool caps concurrent connections so the database
+    // -- the likely first bottleneck under a large traffic increase -- is protected, and
+    // removes per-request connect latency. Pool size is tunable via DB_POOL_MAX_SIZE.
+    private static volatile DataSource dataSource;
+
+    private static DataSource getDataSource() {
+        if (dataSource == null) {
+            synchronized (DatabaseHelper.class) {
+                if (dataSource == null) {
+                    HikariConfig config = new HikariConfig();
+                    config.setJdbcUrl(System.getenv("MSSQL_CONNECTIONSTRING"));
+                    config.setPoolName("credit-card-order-pool");
+                    config.setMaximumPoolSize(readIntEnv("DB_POOL_MAX_SIZE", 20));
+                    config.setMinimumIdle(readIntEnv("DB_POOL_MIN_IDLE", 2));
+                    config.setConnectionTimeout(readIntEnv("DB_POOL_CONNECTION_TIMEOUT_MS", 10000));
+                    dataSource = new HikariDataSource(config);
+                    logger.info("Initialized HikariCP pool [maxPoolSize={}]", config.getMaximumPoolSize());
+                }
+            }
+        }
+        return dataSource;
+    }
+
+    private static int readIntEnv(String name, int defaultValue) {
+        String value = System.getenv(name);
+        if (value == null || value.isBlank()) {
+            return defaultValue;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            logger.warn("Invalid value for {} ('{}'), using default {}", name, value, defaultValue);
+            return defaultValue;
+        }
+    }
+
     public Connection getConnection() throws SQLException {
-        return DriverManager.getConnection(System.getenv("MSSQL_CONNECTIONSTRING"));
+        return getDataSource().getConnection();
     }
 
     public Optional<CreditCardOrderStatus> getLastOrderStatusForAccountId(Connection conn, Integer accountId)
@@ -230,5 +275,51 @@ public class DatabaseHelper {
         query.setInt(1, accountId);
         query.executeUpdate();
         query.close();
+    }
+
+    // ----- Bitcoin payments -----
+
+    public Optional<BitcoinPayment> getBitcoinPaymentByIdempotencyKey(Connection conn, String idempotencyKey)
+            throws SQLException {
+        try (PreparedStatement query = conn.prepareStatement(GET_BITCOIN_PAYMENT_BY_IDEMPOTENCY_KEY_QUERY)) {
+            query.setString(1, idempotencyKey);
+            ResultSet rs = query.executeQuery();
+            if (rs.next()) {
+                return Optional.of(BitcoinPayment.fromResultSet(rs));
+            }
+            return Optional.empty();
+        }
+    }
+
+    public Optional<BitcoinPayment> getBitcoinPaymentById(Connection conn, String id) throws SQLException {
+        try (PreparedStatement query = conn.prepareStatement(GET_BITCOIN_PAYMENT_BY_ID_QUERY)) {
+            query.setString(1, id);
+            ResultSet rs = query.executeQuery();
+            if (rs.next()) {
+                return Optional.of(BitcoinPayment.fromResultSet(rs));
+            }
+            return Optional.empty();
+        }
+    }
+
+    public BitcoinPayment insertBitcoinPayment(Connection conn, BitcoinPaymentRequest request,
+            java.math.BigDecimal amountBtc) throws SQLException {
+        String id = UUID.randomUUID().toString();
+        OffsetDateTime createdAt = OffsetDateTime.now();
+        String status = "payment_created";
+        try (PreparedStatement query = conn.prepareStatement(INSERT_BITCOIN_PAYMENT_QUERY)) {
+            query.setString(1, id);
+            query.setInt(2, request.accountId());
+            query.setString(3, request.idempotencyKey());
+            query.setBigDecimal(4, request.fiatAmount());
+            query.setString(5, request.fiatCurrency());
+            query.setBigDecimal(6, amountBtc);
+            query.setString(7, request.btcAddress());
+            query.setString(8, status);
+            query.setTimestamp(9, Timestamp.from(createdAt.toInstant()));
+            query.executeUpdate();
+        }
+        return new BitcoinPayment(id, request.accountId(), request.idempotencyKey(), request.fiatAmount(),
+                request.fiatCurrency(), amountBtc, request.btcAddress(), status, createdAt);
     }
 }

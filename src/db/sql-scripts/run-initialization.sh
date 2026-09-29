@@ -30,6 +30,7 @@ START=$(date +%s)
 /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "${SA_PASSWORD}" -d master -i sql-creditcardorders.sql
 /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "${SA_PASSWORD}" -d master -i sql-creditcardorderstatus.sql
 /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "${SA_PASSWORD}" -d master -i sql-creditcards.sql
+/opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "${SA_PASSWORD}" -d master -i sql-bitcoinpayments.sql
 END=$(date +%s)
 
 echo "Setup done"
