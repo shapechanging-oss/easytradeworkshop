@@ -322,11 +322,17 @@ public class OrderController {
 
     private int CountArythmeticSequenceTotal(int firstElement, int step, int count)
     {
-        // this has a wrong value (normally would be 2), because we want to create an exception!
-        int theGreatDivider = 0;
+        // Correct divisor for the arithmetic-sequence sum (average of first+last, times count).
+        // Previously hard-coded to 0, which threw java.lang.ArithmeticException: / by zero and
+        // took GET /v1/orders/{accountId}/status/latest to a 100% failure rate in production
+        // whenever the `credit_card_meltdown` feature flag was enabled. Guarded defensively as well.
+        int theGreatDivider = 2;
+
+        if (theGreatDivider == 0) {
+            return 0;
+        }
 
         int lastElement = firstElement + (step * (count - 1));
-        // deepcode ignore DivisionByZero: exception should be thrown here
         int total = (firstElement + lastElement) * count / theGreatDivider;
 
         return total;

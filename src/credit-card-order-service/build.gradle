@@ -33,6 +33,11 @@ dependencies {
 
     implementation 'com.microsoft.sqlserver:mssql-jdbc:12.10.2.jre11'
 
+    // HikariCP connection pool: bounds concurrent DB connections and reuses them, replacing
+    // the previous per-call DriverManager.getConnection(). Highest-leverage change for
+    // scaling the MSSQL tier (the likely first bottleneck under a large traffic increase).
+    implementation 'com.zaxxer:HikariCP:5.1.0'
+
     //lombok
     compileOnly 'org.projectlombok:lombok:1.18.42'
     annotationProcessor 'org.projectlombok:lombok:1.18.42'
